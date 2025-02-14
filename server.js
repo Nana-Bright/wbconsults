@@ -1,27 +1,28 @@
-require("dotenv").config();
+require("dotenv").config(); // Load environment variables
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const bodyParser = require("body-parser");
-const nodemailer = require("nodemailer");
+const jwt = require("jsonwebtoken"); // For admin authentication
+const bcrypt = require("bcrypt"); // Secure password storage
 
 const app = express();
+app.use(express.json());
 app.use(cors());
-app.use(bodyParser.json());
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI, {
+// ✅ MongoDB Connection
+const MONGODB_URI = process.env.MONGODB_URI || "https://cloud.mongodb.com/v2/67ad37a611af767e645b61c0#"; // U
+
+mongoose.connect(MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
-}).then(() => console.log("✅ Connected to MongoDB"))
-  .catch(err => console.log("❌ MongoDB Connection Error:", err));
+}).then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
-// Define Appointment Schema
+// ✅ Appointment Schema & Model
 const appointmentSchema = new mongoose.Schema({
     name: String,
     email: String,
-    phone: String,
-    service: String,
     date: String,
     time: String,
     status: { type: String, default: "Pending" }
@@ -29,86 +30,96 @@ const appointmentSchema = new mongoose.Schema({
 
 const Appointment = mongoose.model("Appointment", appointmentSchema);
 
-// 📌 Route: Create Appointment
-app.post("/appointments", async (req, res) => {
-    try {
-        const newAppointment = new Appointment(req.body);
-        await newAppointment.save();
-        res.status(201).json({ message: "Appointment booked successfully!" });
-
-        // Send confirmation email
-        sendEmail(req.body.email, "Appointment Confirmation", 
-            `Hello ${req.body.name},\n\nYour appointment for ${req.body.service} on ${req.body.date} at ${req.body.time} is received. We will confirm soon.\n\nThank you!`);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+// ✅ Admin Schema & Model (For Authentication)
+const adminSchema = new mongoose.Schema({
+    username: String,
+    password: String
 });
 
-// 📌 Route: Get All Appointments
-app.get("/appointments", async (req, res) => {
+const Admin = mongoose.model("Admin", adminSchema);
+
+// ================== Appointment Routes ==================
+// 🔹 GET All Appointments (For Admin Dashboard)
+app.get("/api/appointments", async (req, res) => {
     try {
         const appointments = await Appointment.find();
         res.json(appointments);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    } catch (error) {
+        res.status(500).json({ message: "Error fetching appointments" });
     }
 });
 
-// 📌 Route: Update Appointment Status
-app.put("/appointments/:id", async (req, res) => {
+// 🔹 POST Create New Appointment
+app.post("/api/appointments", async (req, res) => {
+    try {
+        const { name, email, date, time } = req.body;
+        const newAppointment = new Appointment({ name, email, date, time });
+        await newAppointment.save();
+        res.status(201).json({ message: "Appointment created successfully" });
+    } catch (error) {
+        res.status(500).json({ message: "Error creating appointment" });
+    }
+});
+
+// 🔹 PUT Update Appointment Status
+app.put("/api/appointments/:id", async (req, res) => {
     try {
         const { status } = req.body;
-        const updatedAppointment = await Appointment.findByIdAndUpdate(
-            req.params.id,
-            { status },
-            { new: true }
-        );
-
-        // Send email notification on approval/rejection
-        if (status === "Approved" || status === "Rejected") {
-            sendEmail(updatedAppointment.email, `Appointment ${status}`, 
-                `Hello ${updatedAppointment.name},\n\nYour appointment for ${updatedAppointment.service} on ${updatedAppointment.date} at ${updatedAppointment.time} has been ${status}.\n\nThank you!`);
-        }
-
-        res.json(updatedAppointment);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        await Appointment.findByIdAndUpdate(req.params.id, { status });
+        res.json({ message: "Appointment status updated" });
+    } catch (error) {
+        res.status(500).json({ message: "Error updating appointment" });
     }
 });
 
-// 📌 Route: Delete Appointment
-app.delete("/appointments/:id", async (req, res) => {
+// 🔹 DELETE Appointment
+app.delete("/api/appointments/:id", async (req, res) => {
     try {
         await Appointment.findByIdAndDelete(req.params.id);
-        res.json({ message: "Appointment deleted successfully!" });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.json({ message: "Appointment deleted successfully" });
+    } catch (error) {
+        res.status(500).json({ message: "Error deleting appointment" });
     }
 });
 
-// 📌 Function: Send Emails
-const sendEmail = (to, subject, message) => {
-    const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
+// ================== Admin Authentication Routes ==================
+// 🔹 Admin Signup (Only Run Once to Create Admin)
+app.post("/api/admin/signup", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        const hashedPassword = await bcrypt.hash(password, 10); // Hash password
+        const newAdmin = new Admin({ username, password: hashedPassword });
+        await newAdmin.save();
+        res.status(201).json({ message: "Admin registered successfully" });
+    } catch (error) {
+        res.status(500).json({ message: "Error registering admin" });
+    }
+});
+
+// 🔹 Admin Login
+app.post("/api/admin/login", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        const admin = await Admin.findOne({ username });
+
+        if (!admin) {
+            return res.status(401).json({ message: "Invalid credentials" });
         }
-    });
 
-    const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to,
-        subject,
-        text: message
-    };
+        const isMatch = await bcrypt.compare(password, admin.password);
+        if (!isMatch) {
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
 
-    transporter.sendMail(mailOptions, (error, info) => {
-        if (error) console.log("Email Error:", error);
-        else console.log("Email Sent:", info.response);
-    });
-};
+        const token = jwt.sign({ username: admin.username }, process.env.JWT_SECRET, { expiresIn: "1h" });
+        res.json({ token, message: "Login successful" });
+    } catch (error) {
+        res.status(500).json({ message: "Error logging in" });
+    }
+});
 
-// Start Server
+// 🔹 Admin Logout (Handled on Frontend by Clearing Token)
+
+// ================== Start Server ==================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
